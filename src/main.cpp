@@ -1,106 +1,151 @@
 #include <Arduino.h>
 #include <FastLED.h>
 
-// LED matrix configuration
-#define LED_PIN     6
-#define WIDTH       32
-#define HEIGHT      32
-#define NUM_LEDS    (WIDTH * HEIGHT)
+/* ================= LED CONFIG ================= */
+#define LED_PIN 14
+#define CHIPSET WS2812B
 #define COLOR_ORDER GRB
-#define CHIPSET     WS2812B
-#define BRIGHTNESS  120
+
+#define MATRIX_W 19
+#define MATRIX_H 19
+#define NUM_LEDS (MATRIX_W * MATRIX_H)
+#define BRIGHTNESS 120
 
 CRGB leds[NUM_LEDS];
 
-// Convert x,y to linear index for a serpentine 32x32 matrix
+/* ================= MATRIX MAP ================= */
 uint16_t XY(uint8_t x, uint8_t y) {
-  if (x >= WIDTH) x = WIDTH - 1;
-  if (y >= HEIGHT) y = HEIGHT - 1;
-  uint16_t i;
-  if (y % 2 == 0) {
-    i = y * WIDTH + x;
-  } else {
-    i = y * WIDTH + (WIDTH - 1 - x);
-  }
-  return i;
+  if (y % 2 == 0) return y * MATRIX_W + x;
+  return y * MATRIX_W + (MATRIX_W - 1 - x);
 }
 
-inline void setPixel(int x, int y, const CRGB &c) {
-  if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
-  leds[XY(x, y)] = c;
+/* ================= GAME STATES ================= */
+enum GameState { IDLE, PLAYING, GAME_OVER };
+GameState state = IDLE;
+
+/* ================= GRID ================= */
+#define GRID_W 10
+#define GRID_H 18
+#define GX 4
+#define GY 1
+
+uint8_t grid[GRID_H][GRID_W] = {0};
+int score = 0;
+
+/* ================= PIECES ================= */
+struct Piece { uint8_t s[4][4]; uint8_t w,h; CRGB c; };
+
+Piece pieces[4] = {
+  {{{1,1,0,0},{1,1,0,0}},2,2,CRGB::Yellow},
+  {{{1,0,0,0},{1,0,0,0},{1,1,0,0}},2,3,CRGB::Orange},
+  {{{1,1,0,0},{0,1,1,0}},3,2,CRGB::Red},
+  {{{0,1,0,0},{1,1,1,0}},3,2,CRGB::Purple}
+};
+
+int curPiece, px, py;
+unsigned long gameStartTime;
+
+/* ================= HELPERS ================= */
+void clearMatrix(){ FastLED.clear(); }
+
+void drawCell(int x,int y,CRGB c){
+  leds[XY(GX+x, GY+y)] = c;
 }
 
-// Bresenham line (integer)
-void drawLine(int x0, int y0, int x1, int y1, const CRGB &c) {
-  int dx = abs(x1 - x0);
-  int sx = x0 < x1 ? 1 : -1;
-  int dy = -abs(y1 - y0);
-  int sy = y0 < y1 ? 1 : -1;
-  int err = dx + dy;
-  while (true) {
-    setPixel(x0, y0, c);
-    if (x0 == x1 && y0 == y1) break;
-    int e2 = 2 * err;
-    if (e2 >= dy) { err += dy; x0 += sx; }
-    if (e2 <= dx) { err += dx; y0 += sy; }
-  }
+/* ================= COLLISION ================= */
+bool collide(int nx,int ny){
+  Piece&p=pieces[curPiece];
+  for(int y=0;y<p.h;y++)
+    for(int x=0;x<p.w;x++)
+      if(p.s[y][x]){
+        int gx=nx+x, gy=ny+y;
+        if(gx<0||gx>=GRID_W||gy>=GRID_H) return true;
+        if(gy>=0 && grid[gy][gx]) return true;
+      }
+  return false;
 }
 
-// Filled ellipse rasterization for simple eye shapes
-void drawFilledEllipse(int cx, int cy, int rx, int ry, const CRGB &c) {
-  for (int y = cy - ry; y <= cy + ry; ++y) {
-    for (int x = cx - rx; x <= cx + rx; ++x) {
-      float nx = (float)(x - cx) / (float)rx;
-      float ny = (float)(y - cy) / (float)ry;
-      if (nx * nx + ny * ny <= 1.0f) setPixel(x, y, c);
+/* ================= GAME OPS ================= */
+void lockPiece(){
+  Piece&p=pieces[curPiece];
+  for(int y=0;y<p.h;y++)
+    for(int x=0;x<p.w;x++)
+      if(p.s[y][x]) grid[py+y][px+x]=1;
+}
+
+void clearLines(){
+  for(int y=GRID_H-1;y>=0;y--){
+    bool full=true;
+    for(int x=0;x<GRID_W;x++) if(!grid[y][x]) full=false;
+    if(full){
+      score++;
+      Serial.print("SCORE:");
+      Serial.println(score);
+
+      for(int ty=y;ty>0;ty--)
+        for(int x=0;x<GRID_W;x++)
+          grid[ty][x]=grid[ty-1][x];
+      memset(grid[0],0,GRID_W);
+      y++;
     }
   }
 }
 
-// Draw a simple stylized Spiderman face/logo centered on 32x32
-void drawSpideyLogo() {
-  // Base: full red background
-  for (int i = 0; i < NUM_LEDS; ++i) leds[i] = CRGB::Red;
+void spawnPiece(){
+  curPiece=random(0,4);
+  px=(GRID_W-pieces[curPiece].w)/2;
+  py=0;
+}
 
-  // Draw eyes (two white ellipses)
-  drawFilledEllipse(10, 13, 6, 9, CRGB::White);
-  drawFilledEllipse(21, 13, 6, 9, CRGB::White);
-
-  // Eye outlines
-  drawLine(6, 9, 14, 9, CRGB::Black);
-  drawLine(6, 9, 8, 15, CRGB::Black);
-  drawLine(26, 9, 18, 9, CRGB::Black);
-  drawLine(26, 9, 24, 15, CRGB::Black);
-
-  // Spider body (vertical)
-  for (int y = 14; y <= 23; ++y) setPixel(16, y, CRGB::Black);
-
-  // Spider legs (simple stylized lines)
-  drawLine(16, 16, 10, 10, CRGB::Black);
-  drawLine(16, 16, 22, 10, CRGB::Black);
-  drawLine(16, 18, 8, 14, CRGB::Black);
-  drawLine(16, 18, 24, 14, CRGB::Black);
-  drawLine(16, 20, 7, 20, CRGB::Black);
-  drawLine(16, 20, 25, 20, CRGB::Black);
-
-  // Add subtle webbing lines (curved-ish using short segments)
-  for (int i = 0; i < 6; ++i) {
-    int y = 8 + i * 3;
-    drawLine(6 + i, y, 26 - i, y, CRGB::DarkRed);
+/* ================= SERIAL INPUT ================= */
+void handleSerial(){
+  while(Serial.available()){
+    char c=Serial.read();
+    if(c=='L' && !collide(px-1,py)) px--;
+    if(c=='R' && !collide(px+1,py)) px++;
+    if(c=='D' && !collide(px,py+1)) py++;
+    if(c=='S'){
+      memset(grid,0,sizeof(grid));
+      score=0;
+      spawnPiece();
+      gameStartTime = millis();
+      state=PLAYING;
+    }
   }
 }
 
-void setup() {
-  FastLED.addLeds<CHIPSET, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
-  FastLED.clear();
+/* ================= SETUP ================= */
+void setup(){
+  Serial.begin(115200);
+  FastLED.addLeds<CHIPSET,LED_PIN,COLOR_ORDER>(leds,NUM_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
+  randomSeed(millis());
 }
 
-void loop() {
-  // Pulse brightness and redraw logo
-  uint8_t pulse = beatsin8(10, 40, BRIGHTNESS);
-  FastLED.setBrightness(pulse);
-  drawSpideyLogo();
-  FastLED.show();
-  delay(30);
+/* ================= LOOP ================= */
+unsigned long lastFall=0;
+
+void loop(){
+  handleSerial();
+
+  if(state==PLAYING){
+    if(millis()-gameStartTime > 30000){   // 30 seconds
+      Serial.print("GAME_OVER:");
+      Serial.println(score);
+      state = GAME_OVER;
+    }
+
+    if(millis()-lastFall>500){
+      if(!collide(px,py+1)) py++;
+      else { lockPiece(); clearLines(); spawnPiece(); }
+      lastFall=millis();
+    }
+
+    clearMatrix();
+    for(int y=0;y<GRID_H;y++)
+      for(int x=0;x<GRID_W;x++)
+        if(grid[y][x]) drawCell(x,y,CRGB::Blue);
+    drawCell(px,py,pieces[curPiece].c);
+    FastLED.show();
+  }
 }
